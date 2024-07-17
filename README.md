@@ -1,7 +1,7 @@
 # ControlNet with attention refocusing loss
 
 ## Install ControlNet
-Set up the environment, download controlnet models, see the [controlnet](README_controlney.md)
+Set up the environment, download controlnet models, see the [controlnet](README_controlnet.md)
 
 ## Inference
 Run inference with scribble :
