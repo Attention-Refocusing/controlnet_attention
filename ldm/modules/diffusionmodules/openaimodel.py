@@ -77,14 +77,19 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
     """
 
     def forward(self, x, emb, context=None):
+        list_cross = []
+        list_self = []
         for layer in self:
             if isinstance(layer, TimestepBlock):
                 x = layer(x, emb)
             elif isinstance(layer, SpatialTransformer):
-                x = layer(x, context)
+                x, cross_attn, self_attn = layer(x, context)
+                list_cross.append(cross_attn)
+                list_self.append(self_attn)
             else:
+               
                 x = layer(x)
-        return x
+        return x, list_cross, list_self
 
 
 class Upsample(nn.Module):
@@ -310,11 +315,11 @@ class AttentionBlock(nn.Module):
 
         self.proj_out = zero_module(conv_nd(1, channels, channels, 1))
 
-    def forward(self, x):
-        return checkpoint(self._forward, (x,), self.parameters(), True)   # TODO: check checkpoint usage, is True # TODO: fix the .half call!!!
+    # def forward(self, x):
+    #     return checkpoint(self._forward, (x,), self.parameters(), True)   # TODO: check checkpoint usage, is True # TODO: fix the .half call!!!
         #return pt_checkpoint(self._forward, x)  # pytorch
 
-    def _forward(self, x):
+    def forward(self, x):
         b, c, *spatial = x.shape
         x = x.reshape(b, c, -1)
         qkv = self.qkv(self.norm(x))
@@ -517,7 +522,8 @@ class UNetModel(nn.Module):
         self.conv_resample = conv_resample
         self.num_classes = num_classes
         self.use_checkpoint = use_checkpoint
-        self.dtype = th.float16 if use_fp16 else th.float32
+        self.dtype =  th.float32
+        #self.dtype = th.float16 if use_fp16 else th.float32
         self.num_heads = num_heads
         self.num_head_channels = num_head_channels
         self.num_heads_upsample = num_heads_upsample
@@ -770,17 +776,24 @@ class UNetModel(nn.Module):
         if self.num_classes is not None:
             assert y.shape[0] == x.shape[0]
             emb = emb + self.label_emb(y)
-
+        first_cross = []
         h = x.type(self.dtype)
+        first_self = []
         for module in self.input_blocks:
-            h = module(h, emb, context)
+            h, cross, self1 = module(h, emb, context)
             hs.append(h)
-        h = self.middle_block(h, emb, context)
+            first_cross.append(cross)
+            first_self.append(self1)
+        h, middle_cross, middle_self = self.middle_block(h, emb, context)
+        third_cross = []
+        third_self = []
         for module in self.output_blocks:
             h = th.cat([h, hs.pop()], dim=1)
-            h = module(h, emb, context)
+            h, cross, self2 = module(h, emb, context)
+            third_cross.append(cross)
+            third_self.append(self2)
         h = h.type(x.dtype)
         if self.predict_codebook_ids:
             return self.id_predictor(h)
         else:
-            return self.out(h)
+            return self.out(h), first_cross, middle_cross, third_cross, first_self, middle_self, third_self

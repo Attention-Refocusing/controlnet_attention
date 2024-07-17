@@ -171,14 +171,14 @@ class CrossAttention(nn.Module):
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h=h), (q, k, v))
 
         # force cast to fp32 to avoid overflowing
-        if _ATTN_PRECISION =="fp32":
-            with torch.autocast(enabled=False, device_type = 'cuda'):
-                q, k = q.float(), k.float()
-                sim = einsum('b i d, b j d -> b i j', q, k) * self.scale
-        else:
-            sim = einsum('b i d, b j d -> b i j', q, k) * self.scale
+        # if _ATTN_PRECISION =="fp32":
+        #     # with torch.autocast(enabled=False, device_type = 'cuda'):
+        #     q, k = q.float(), k.float()
+        #     sim = einsum('b i d, b j d -> b i j', q, k) * self.scale
+        # else:
+        sim = einsum('b i d, b j d -> b i j', q, k) * self.scale
         
-        del q, k
+        # del q, k
     
         if exists(mask):
             mask = rearrange(mask, 'b ... -> b (...)')
@@ -191,7 +191,13 @@ class CrossAttention(nn.Module):
 
         out = einsum('b i j, b j d -> b i d', sim, v)
         out = rearrange(out, '(b h) n d -> b n (h d)', h=h)
-        return self.to_out(out)
+        torch.cuda.empty_cache()
+        # import pdb; pdb.set_trace()
+        
+        if (sim.shape[1]== 416 ):
+            return self.to_out(out), sim
+        else:
+            return self.to_out(out), None
 
 
 class MemoryEfficientCrossAttention(nn.Module):
@@ -265,14 +271,16 @@ class BasicTransformerBlock(nn.Module):
         self.norm3 = nn.LayerNorm(dim)
         self.checkpoint = checkpoint
 
-    def forward(self, x, context=None):
-        return checkpoint(self._forward, (x, context), self.parameters(), self.checkpoint)
+    # def forward(self, x, context=None):
+    #     return checkpoint(self._forward, (x, context), self.parameters(), self.checkpoint)
 
-    def _forward(self, x, context=None):
-        x = self.attn1(self.norm1(x), context=context if self.disable_self_attn else None) + x
-        x = self.attn2(self.norm2(x), context=context) + x
+    def forward(self, x, context=None):
+        out, attn_self = self.attn1(self.norm1(x), context=context if self.disable_self_attn else None) 
+        x = out + x
+        out, attn_cross = self.attn2(self.norm2(x), context=context)
+        x = out + x
         x = self.ff(self.norm3(x)) + x
-        return x
+        return x, attn_cross, attn_self
 
 
 class SpatialTransformer(nn.Module):
@@ -330,12 +338,18 @@ class SpatialTransformer(nn.Module):
         x = rearrange(x, 'b c h w -> b (h w) c').contiguous()
         if self.use_linear:
             x = self.proj_in(x)
+        list_cross = []
+        list_self = []
         for i, block in enumerate(self.transformer_blocks):
-            x = block(x, context=context[i])
+            x, cross, self_attn = block(x, context=context[i])
+            if cross !=None:
+                list_cross.append(cross)
+            if self_attn != None:
+                list_self.append(self_attn)
         if self.use_linear:
             x = self.proj_out(x)
         x = rearrange(x, 'b (h w) c -> b c h w', h=h, w=w).contiguous()
         if not self.use_linear:
             x = self.proj_out(x)
-        return x + x_in
+        return x + x_in, list_cross, list_self
 

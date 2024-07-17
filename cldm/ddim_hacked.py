@@ -5,8 +5,8 @@ import numpy as np
 from tqdm import tqdm
 
 from ldm.modules.diffusionmodules.util import make_ddim_sampling_parameters, make_ddim_timesteps, noise_like, extract_into_tensor
-
-
+from cldm.loss import seg_loss, pose_loss, caculate_loss_self_att_seg
+from copy import deepcopy
 class DDIMSampler(object):
     def __init__(self, model, schedule="linear", **kwargs):
         super().__init__()
@@ -51,7 +51,7 @@ class DDIMSampler(object):
                         1 - self.alphas_cumprod / self.alphas_cumprod_prev))
         self.register_buffer('ddim_sigmas_for_original_num_steps', sigmas_for_original_sampling_steps)
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def sample(self,
                S,
                batch_size,
@@ -118,8 +118,57 @@ class DDIMSampler(object):
                                                     ucg_schedule=ucg_schedule
                                                     )
         return samples, intermediates
+    def update_latent(self, img, cond, ts, index1 ):
+        
+        if index1 < 5:
+            loss_scale = 2# 3 #1 #4  #1
+            max_iter = 3 #6
+        elif index1 <10:
+            loss_scale = 1.5#2# 0.5 #3 #0.5 # 30
+            max_iter = 2
+        elif index1 < 20:
+            loss_scale = 1
+            max_iter = 2
+        else:
+            loss_scale = 1
+            max_iter = 1
 
-    @torch.no_grad()
+
+        loss_threshold = 0.1
+        max_index = 10 
+        print('--------------------',max_index)
+        x = deepcopy(img) 
+        iteration = 0
+        loss = torch.tensor(10000)
+        # input["timesteps"] = ts
+        
+        print("optimize", index1)
+        while loss.item() > loss_threshold and iteration < max_iter and (index1 < max_index) :
+            print('iter', iteration)
+            x = x.requires_grad_(True)
+            e_t,  att_first, att_second, att_third, self_attn1, self_attn2, self_attn3 = self.model.apply_model(x,  ts,cond)
+            loss = seg_loss(att_second,att_first,att_third, t=index1)* loss_scale
+            # loss = pose_loss(att_second,att_first,att_third, t=index1)* loss_scale
+            # loss_self = caculate_loss_self_att_seg(self_attn1, self_attn2, self_attn3, t=index1)
+            # loss += loss_self * 10
+            print(loss)
+            # import pdb; pdb.set_trace()
+            # torch.autograd.set_detect_anomaly(True)
+            torch.cuda.empty_cache()
+            hh = torch.autograd.backward(loss)
+            grad_cond = x.grad 
+            x = x - grad_cond
+            x = x.detach()
+            iteration += 1
+            
+            print('done iter', iteration)
+            del att_first, att_second, att_third,e_t
+            torch.cuda.empty_cache()
+            
+            
+        return x
+
+    # @torch.no_grad()
     def ddim_sampling(self, cond, shape,
                       x_T=None, ddim_use_original_steps=False,
                       callback=None, timesteps=None, quantize_denoised=False,
@@ -159,7 +208,8 @@ class DDIMSampler(object):
             if ucg_schedule is not None:
                 assert len(ucg_schedule) == len(time_range)
                 unconditional_guidance_scale = ucg_schedule[i]
-
+            
+            img = self.update_latent(img, cond, ts, i)
             outs = self.p_sample_ddim(img, cond, ts, index=index, use_original_steps=ddim_use_original_steps,
                                       quantize_denoised=quantize_denoised, temperature=temperature,
                                       noise_dropout=noise_dropout, score_corrector=score_corrector,
@@ -183,12 +233,12 @@ class DDIMSampler(object):
                       unconditional_guidance_scale=1., unconditional_conditioning=None,
                       dynamic_threshold=None):
         b, *_, device = *x.shape, x.device
-
+        
         if unconditional_conditioning is None or unconditional_guidance_scale == 1.:
-            model_output = self.model.apply_model(x, t, c)
+            model_output, cross_attn, _, _ = self.model.apply_model(x, t, c)
         else:
-            model_t = self.model.apply_model(x, t, c)
-            model_uncond = self.model.apply_model(x, t, unconditional_conditioning)
+            model_t,_,_,_,_,_,_ = self.model.apply_model(x, t, c)
+            model_uncond, _, _, _,_,_,_ = self.model.apply_model(x, t, unconditional_conditioning)
             model_output = model_uncond + unconditional_guidance_scale * (model_t - model_uncond)
 
         if self.model.parameterization == "v":
@@ -230,7 +280,7 @@ class DDIMSampler(object):
         x_prev = a_prev.sqrt() * pred_x0 + dir_xt + noise
         return x_prev, pred_x0
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def encode(self, x0, c, t_enc, use_original_steps=False, return_intermediates=None,
                unconditional_guidance_scale=1.0, unconditional_conditioning=None, callback=None):
         timesteps = np.arange(self.ddpm_num_timesteps) if use_original_steps else self.ddim_timesteps
@@ -278,7 +328,7 @@ class DDIMSampler(object):
             out.update({'intermediates': intermediates})
         return x_next, out
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def stochastic_encode(self, x0, t, use_original_steps=False, noise=None):
         # fast, but does not allow for exact reconstruction
         # t serves as an index to gather the correct alphas
@@ -294,7 +344,7 @@ class DDIMSampler(object):
         return (extract_into_tensor(sqrt_alphas_cumprod, t, x0.shape) * x0 +
                 extract_into_tensor(sqrt_one_minus_alphas_cumprod, t, x0.shape) * noise)
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def decode(self, x_latent, cond, t_start, unconditional_guidance_scale=1.0, unconditional_conditioning=None,
                use_original_steps=False, callback=None):
 

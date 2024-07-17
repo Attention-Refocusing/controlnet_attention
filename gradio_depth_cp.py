@@ -7,46 +7,42 @@ import gradio as gr
 import numpy as np
 import torch
 import random
-import os
+
 from pytorch_lightning import seed_everything
 from annotator.util import resize_image, HWC3
-from annotator.openpose import OpenposeDetector
+from annotator.midas import MidasDetector
+from annotator.zoe import ZoeDetector
 from cldm.model import create_model, load_state_dict
 from cldm.ddim_hacked import DDIMSampler
+from annotator.uniformer import UniformerDetector
 from annotator.oneformer import OneformerCOCODetector, OneformerADE20kDetector
+
 
 preprocessor = None
 
-model_name = 'control_v11p_sd15_openpose'
+model_name = 'control_v11f1p_sd15_depth'
 model = create_model(f'./models/{model_name}.yaml').cpu()
 model.load_state_dict(load_state_dict('./models/v1-5-pruned.ckpt', location='cuda'), strict=False)
 model.load_state_dict(load_state_dict(f'./models/{model_name}.pth', location='cuda'), strict=False)
 model = model.cuda()
 ddim_sampler = DDIMSampler(model)
 
-# def generate_seg_paper(detected_map):
-#     gray_big = cv2.cvtColor(detected_map, cv2.COLOR_BGR2GRAY)
-#     # class1 = 151
-#     # class1 = 208
-#     # class2 = 57 # teddy
-#     # class2 =55
-#     # class2 = 101  # boy
-#     class1 = 55 #bo
-#     bi_linear = np.zeros_like(gray_big)
-#     # import pdb; pdb.set_trace()
-#     bi_linear[np.where(gray_big==class1) ] = 1
-#     # bi_linear[np.where(gray_big==class2) ] = 1
-#     bi3 = np.expand_dims(bi_linear, axis=-1)
-#     bi3 =  np.repeat(bi3, 3, axis=-1)
-#     seg_img = detected_map *bi3
-#     seg_img[seg_img==0] = 255
-#     # cv2.imwrite('paper/woman.png',seg_img)
-#     # assert False
-    
+def generate_seg_paper(detected_map):
+    gray_big = cv2.cvtColor(detected_map, cv2.COLOR_BGR2GRAY)
+    class1 = 164
+    class2 = 112
+    bi_linear = np.zeros_like(gray_big)
+    # import pdb; pdb.set_trace()
+    bi_linear[np.where(gray_big==class1) ] = 1
+    bi_linear[np.where(gray_big==class2) ] = 1
+    bi3 = np.expand_dims(bi_linear, axis=-1)
+    bi3 =  np.repeat(bi3, 3, axis=-1)
+    seg_img = detected_map *bi3
+    seg_img[seg_img==0] = 255
+    cv2.imwrite('paper/apple.png',seg_img[:,:,::-1])
 
 def get_segment(det, input_image):
     global preprocessor
-    # import pdb; pdb.set_trace()
     if det == 'Seg_OFCOCO':
         if not isinstance(preprocessor, OneformerCOCODetector):
             preprocessor = OneformerCOCODetector()
@@ -57,10 +53,13 @@ def get_segment(det, input_image):
         if not isinstance(preprocessor, UniformerDetector):
             preprocessor = UniformerDetector()
 
-    class1 = 55
-    # class2 = 101
-    # class2=11
-    
+    # import pdb; pdb.set_trace()
+    # class1 = 55
+    # class2=208
+    # class1 = 151
+    # class2 = 208
+    class1 = 164
+    class2 = 112
     input_image = HWC3(input_image)
     
 
@@ -69,65 +68,48 @@ def get_segment(det, input_image):
     else:
         detected_map = preprocessor(resize_image(input_image, detect_resolution))
         detected_map = HWC3(detected_map)
-    cv2.imwrite('couple.png',detected_map)
-    # assert False
-    # generate_seg_paper(detected_map)
-
+    generate_seg_paper(detected_map)
+    
     img = resize_image(input_image, image_resolution)
     H, W, C = img.shape
-    W_attn, H_attn =int(W/32), int(H/32)
+    W_attn, H_attn = int(W/32), int(H/32)
     # import pdb; pdb.set_trace()
     # detected_map = cv2.resize(detected_map, (W, H), interpolation=cv2.INTER_LINEAR)
     #resize mask
     detected_map = cv2.resize(detected_map, (W_attn, H_attn),interpolation=cv2.INTER_LINEAR)
-    
+    # import pdb; pdb.set_trace()
     gray = cv2.cvtColor(detected_map, cv2.COLOR_BGR2GRAY)
     mask_1 = np.zeros((H_attn, W_attn))
     mask_1 [gray==class1] = 1.
-    # mask_2 = np.zeros((H_attn, W_attn))
-    # mask_2[gray==class2]=1.
-    # import pdb; pdb.set_trace()
-    cv2.imwrite('img_pose/mask/couple.png',mask_1)
-
-    # cv2.imwrite('img_depth/mask/um.png',mask_2)
+    mask_2 = np.zeros((H_attn, W_attn))
+    mask_2[gray==class2]=1.
+    cv2.imwrite('img_depth/mask_apple/mask1.png',mask_1)
+    cv2.imwrite('img_depth/mask_apple/mask2.png',mask_2)
 
 
 def process(det, input_image, prompt, a_prompt, n_prompt, num_samples, image_resolution, detect_resolution, ddim_steps, guess_mode, strength, scale, seed, eta):
     global preprocessor
 
-    if 'Openpose' in det:
-        if not isinstance(preprocessor, OpenposeDetector):
-            preprocessor = OpenposeDetector()
+    if det == 'Depth_Midas':
+        if not isinstance(preprocessor, MidasDetector):
+            preprocessor = MidasDetector()
+    if det == 'Depth_Zoe':
+        if not isinstance(preprocessor, ZoeDetector):
+            preprocessor = ZoeDetector()
 
-    # with torch.no_grad():
     if True:
         input_image = HWC3(input_image)
-        
 
         if det == 'None':
             detected_map = input_image.copy()
         else:
-            detected_map = preprocessor(resize_image(input_image, detect_resolution), hand_and_face='Full' in det)
+            detected_map = preprocessor(resize_image(input_image, detect_resolution))
             detected_map = HWC3(detected_map)
 
         img = resize_image(input_image, image_resolution)
         H, W, C = img.shape
-        print(H,W)
 
         detected_map = cv2.resize(detected_map, (W, H), interpolation=cv2.INTER_LINEAR)
-        # import pdb;pdb.set_trace()
-        save_bounding_box = True
-        if save_bounding_box:
-            img_save = np.zeros_like(detected_map)
-            min_x = np.min(np.where(detected_map>0)[0])
-            max_x = np.max(np.where(detected_map>0)[0])
-            min_y = np.min(np.where(detected_map>0)[1])
-            max_y = np.max(np.where(detected_map>0)[1])
-            arr_save = np.array([min_x,min_y, max_x, max_y])
-            np.save('img_pose/shake.npy', arr_save)
-            # with open('img_pose/shake.json','wb') as f:
-            #     json.write({[min_x, min_y, max_x, max_y]}, f)
-            
 
         control = torch.from_numpy(detected_map.copy()).float().cuda() / 255.0
         control = torch.stack([control for _ in range(num_samples)], dim=0)
@@ -163,51 +145,38 @@ def process(det, input_image, prompt, a_prompt, n_prompt, num_samples, image_res
 
         results = [x_samples[i] for i in range(num_samples)]
     return [detected_map] + results
+
 if __name__=='__main__':
-    det = 'Openpose_Full'
-    img_names = os.listdir('try_img/ballon')
-    cnt=0
-    for n in img_names:
-        cnt+=1
-        if cnt != 6: continue
-        print (n)
-        # import pdb; pdb.set_trace()
-        # n = 
-        input_image = cv2.imread(os.path.join('try_img/ballon', n))
-        # input_image = cv2.imread('img_pose/shake.jpeg')
-        # prompt = 'a woman wearing a dress and a man wearing a suit  holding a umbrella in the rain.'
-        # prompt = 'A woman with a bouquet of flowers holding the hand of a man, the man holding ballons'
-        # prompt = 'A woman with a bouquet of flowers holding the hand of a man'
-        # prompt = 'two kids playing in the grass'
-        # prompt = 'a cat like a human riding a skateboard, digitial art, art concept, '
-        # prompt = 'a kid ridding a skateboard'
-        prompt = 'two little girls playing in the grass'
-        a_prompt = ', best quality'
-        n_prompt = 'lowres, bad anatomy, bad hands, cropped, worst quality' 
-        num_samples = 1
-        image_resolution = 512
-        detect_resolution = 512 
-        ddim_steps = 20
-        guess_mode = False
-        strength = 1.
-        scale = 9.0
-        # seed = 0
-        eta = 1.0
-        det_seg = 'Seg_OFCOCO'
-        get_segment(det_seg, input_image)
-       
-        for i in range(2,3):
-            seed = i
-            results = process(det, input_image, prompt, a_prompt, n_prompt, num_samples, image_resolution, detect_resolution, ddim_steps, guess_mode, strength, scale, seed, eta)
-            cv2.imwrite('img_pose/ballon/00loss_truetru'+ n,results[0])
-            cv2.imwrite('img_pose/ballon/00loss_truetru' +n  + str(i)+'_.png',results[1][:,:,::-1])
-            # cv2.imwrite('img_pose/img5/carsry.png',results[0])
-            # cv2.imwrite('img_pose/img5/' + str(i)+'carry.png',results[1][:,:,::-1])
+    det = 'Depth_Midas'
+    input_image = cv2.imread('img_depth/Apple_and_Orange.jpeg')
+    # input_image = cv2.resize(input_image,(832,512))
+    prompt = 'an Orange in the front of an apple'
+    a_prompt = 'best quality'
+    n_prompt = 'lowres, bad anatomy, bad hands, cropped, worst quality' 
+    num_samples = 1
+    image_resolution = 512
+    detect_resolution = 512 
+    ddim_steps = 20
+    guess_mode = False
+    strength = 1.0
+    scale = 9.0
+    # seed = 0
+    eta = 1.0
+    # det_seg = 'Seg_OFCOCO'
+    # get_segment(det_seg, input_image)
+    
+    for i in range(0,20):
+        if i!=0 and i!=9: continue
+        seed = i
+        results = process(det, input_image, prompt, a_prompt, n_prompt, num_samples, image_resolution, detect_resolution, ddim_steps, guess_mode, strength, scale, seed, eta)
+        cv2.imwrite('img_depth/apple/loss/no2carry.png',results[0])
+        cv2.imwrite('img_depth/apple/loss/no2' + str(i)+'carry_noloss.png',results[1][:,:,::-1])
+
 
 # block = gr.Blocks().queue()
 # with block:
 #     with gr.Row():
-#         gr.Markdown("## Control Stable Diffusion with OpenPose")
+#         gr.Markdown("## Control Stable Diffusion with Depth Maps")
 #     with gr.Row():
 #         with gr.Column():
 #             input_image = gr.Image(source='upload', type="numpy")
@@ -215,7 +184,7 @@ if __name__=='__main__':
 #             run_button = gr.Button(label="Run")
 #             num_samples = gr.Slider(label="Images", minimum=1, maximum=12, value=1, step=1)
 #             seed = gr.Slider(label="Seed", minimum=-1, maximum=2147483647, step=1, value=12345)
-#             det = gr.Radio(choices=["Openpose_Full", "Openpose", "None"], type="value", value="Openpose_Full", label="Preprocessor")
+#             det = gr.Radio(choices=["Depth_Zoe", "Depth_Midas", "None"], type="value", value="Depth_Zoe", label="Preprocessor")
 #             with gr.Accordion("Advanced options", open=False):
 #                 image_resolution = gr.Slider(label="Image Resolution", minimum=256, maximum=768, value=512, step=64)
 #                 strength = gr.Slider(label="Control Strength", minimum=0.0, maximum=2.0, value=1.0, step=0.01)

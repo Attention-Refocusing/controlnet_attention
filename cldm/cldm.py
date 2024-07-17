@@ -22,27 +22,36 @@ from ldm.models.diffusion.ddim import DDIMSampler
 class ControlledUnetModel(UNetModel):
     def forward(self, x, timesteps=None, context=None, control=None, only_mid_control=False, **kwargs):
         hs = []
-        with torch.no_grad():
+        # with torch.no_grad():
+        if True:
             t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False)
             emb = self.time_embed(t_emb)
             h = x.type(self.dtype)
+            cross1 = []
+            self1 = []
             for module in self.input_blocks:
-                h = module(h, emb, context)
+                h, cross_attn, self_attn = module(h, emb, context)
+                cross1.append(cross_attn)
+                self1.append(self_attn)
                 hs.append(h)
-            h = self.middle_block(h, emb, context)
+            h, mid_cross, mid_self = self.middle_block(h, emb, context)
 
         if control is not None:
             h += control.pop()
-
+        cross3 = []
+        self3 = []
         for i, module in enumerate(self.output_blocks):
             if only_mid_control or control is None:
                 h = torch.cat([h, hs.pop()], dim=1)
             else:
-                h = torch.cat([h, hs.pop() + control.pop()], dim=1)
-            h = module(h, emb, context)
+                h= torch.cat([h, hs.pop() + control.pop()], dim=1)
+            h, cross, self_attn = module(h, emb, context)
+            cross3.append(cross)
+            self3.append(self_attn)
+
 
         h = h.type(x.dtype)
-        return self.out(h)
+        return self.out(h), cross1, mid_cross, cross3, self1, mid_self, self3
 
 
 class ControlNet(nn.Module):
@@ -284,23 +293,27 @@ class ControlNet(nn.Module):
     def forward(self, x, hint, timesteps, context, **kwargs):
         t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False)
         emb = self.time_embed(t_emb)
-
-        guided_hint = self.input_hint_block(hint, emb, context)
+        # import pdb; pdb.set_trace()
+        guided_hint,_, _= self.input_hint_block(hint, emb, context)
 
         outs = []
 
         h = x.type(self.dtype)
+        cross1 = []
+       
         for module, zero_conv in zip(self.input_blocks, self.zero_convs):
             if guided_hint is not None:
-                h = module(h, emb, context)
+                h, cross, self_attn = module(h, emb, context)
                 h += guided_hint
                 guided_hint = None
             else:
-                h = module(h, emb, context)
-            outs.append(zero_conv(h, emb, context))
+                h,cross,self_attn = module(h, emb, context)
+            cross1.append(cross)
+            
+            outs.append(zero_conv(h, emb, context)[0])
 
-        h = self.middle_block(h, emb, context)
-        outs.append(self.middle_block_out(h, emb, context))
+        h, cross_mid, self_mid = self.middle_block(h, emb, context)
+        outs.append(self.middle_block_out(h, emb, context)[0])
 
         return outs
 
@@ -315,7 +328,7 @@ class ControlLDM(LatentDiffusion):
         self.control_scales = [1.0] * 13
         self.global_average_pooling = global_average_pooling
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def get_input(self, batch, k, bs=None, *args, **kwargs):
         x, c = super().get_input(batch, self.first_stage_key, *args, **kwargs)
         control = batch[self.control_key]
@@ -333,21 +346,22 @@ class ControlLDM(LatentDiffusion):
         cond_txt = torch.cat(cond['c_crossattn'], 1)
 
         if cond['c_concat'] is None:
-            eps = diffusion_model(x=x_noisy, timesteps=t, context=cond_txt, control=None, only_mid_control=self.only_mid_control)
+            eps,cross1, cross2, cross3, self1, self2, self3 = diffusion_model(x=x_noisy, timesteps=t, context=cond_txt, control=None, only_mid_control=self.only_mid_control)
         else:
             control = self.control_model(x=x_noisy, hint=torch.cat(cond['c_concat'], 1), timesteps=t, context=cond_txt)
-            control = [c * scale for c, scale in zip(control, self.control_scales)]
+            # import pdb; pdb.set_trace()
+            control2 = [c * scale for c, scale in zip(control, self.control_scales)]
             if self.global_average_pooling:
                 control = [torch.mean(c, dim=(2, 3), keepdim=True) for c in control]
-            eps = diffusion_model(x=x_noisy, timesteps=t, context=cond_txt, control=control, only_mid_control=self.only_mid_control)
+            eps,cross1, cross2, cross3, self1, self2, self3 = diffusion_model(x=x_noisy, timesteps=t, context=cond_txt, control=control2, only_mid_control=self.only_mid_control)
 
-        return eps
+        return eps,cross1, cross2, cross3, self1, self2, self3
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def get_unconditional_conditioning(self, N):
         return self.get_learned_conditioning([""] * N)
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def log_images(self, batch, N=4, n_row=2, sample=False, ddim_steps=50, ddim_eta=0.0, return_keys=None,
                    quantize_denoised=True, inpaint=True, plot_denoise_rows=False, plot_progressive_rows=True,
                    plot_diffusion_rows=False, unconditional_guidance_scale=9.0, unconditional_guidance_label=None,
@@ -408,7 +422,7 @@ class ControlLDM(LatentDiffusion):
 
         return log
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def sample_log(self, cond, batch_size, ddim, ddim_steps, **kwargs):
         ddim_sampler = DDIMSampler(self)
         b, c, h, w = cond["c_concat"][0].shape
